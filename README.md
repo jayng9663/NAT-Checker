@@ -105,6 +105,41 @@ git push origin v1.0.0
 
 ---
 
+## How it works
+
+The detector runs a three-phase STUN probe and narrows the NAT type at each step:
+
+```mermaid
+flowchart TD
+    A([Start]) --> B[Phase 1 — probe STUN servers<br/>with distinct IPs]
+    B --> C{Any server<br/>reachable?}
+    C -- No --> UDP[UDP Blocked]
+    C -- Yes --> D{Mapped IP == local IP?}
+    D -- Yes --> OPEN[Open Internet]
+    D -- No --> E[Phase 2 — compare mapped<br/>IP:port across servers]
+    E --> F{Mapping differs<br/>between servers?}
+    F -- Yes --> SYM[Symmetric NAT]
+    F -- No --> G[Phase 3 — find server that<br/>honours CHANGE_REQUEST]
+    G --> H{Alternate-address<br/>server found?}
+    H -- No --> PRC[Port Restricted NAT]
+    H -- Yes --> I[Test II — ask for reply<br/>from changed IP + port]
+    I --> J{Reply from a<br/>different IP?}
+    J -- Yes --> FULL[Full Cone NAT]
+    J -- No --> K[Test III — ask for reply<br/>from changed port]
+    K --> L{Reply from a<br/>different port?}
+    L -- Yes --> RC[Restricted NAT]
+    L -- No --> PRC
+
+    classDef good fill:#1f7a1f,stroke:#0d3,color:#fff
+    classDef warn fill:#8a6d00,stroke:#fc0,color:#fff
+    classDef bad fill:#7a1f1f,stroke:#f33,color:#fff
+    class OPEN,FULL good
+    class RC,PRC warn
+    class SYM,UDP bad
+```
+
+---
+
 ## Attribution
 
 Portions of this codebase were generated with the assistance of [Claude](https://claude.ai) (Anthropic's AI assistant).
