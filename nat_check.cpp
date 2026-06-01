@@ -80,7 +80,7 @@ static constexpr uint32_t STUN_MAGIC_COOKIE = 0x2112A442;
 static constexpr uint32_t CHANGE_IP   = 0x00000004;
 static constexpr uint32_t CHANGE_PORT = 0x00000002;
 
-static constexpr int DEFAULT_TIMEOUT_MS = 2000;
+static constexpr int DEFAULT_TIMEOUT_MS = 1000;
 static constexpr int MAX_RETRIES        = 3;
 
 // Data Structures
@@ -177,7 +177,9 @@ class StunMessage {
 // STUN Parser
 static StunAddress parseAddress(const uint8_t* buf, uint16_t len, bool xorMapped, const uint8_t* /*txId*/) {
 	StunAddress addr;
-	if (len < 4) return addr;
+	// MAPPED-ADDRESS family is IPv4 here: 1 byte reserved + 1 family + 2 port + 4 addr.
+	// Require all 8 bytes before dereferencing to avoid reading past the attribute.
+	if (len < 8) return addr;
 	uint8_t family = buf[1];
 	if (family != 0x01) return addr; // IPv4 only
 
@@ -350,8 +352,9 @@ class UdpSocket {
 static std::mt19937 rng{std::random_device{}()};
 
 static void makeTxId(uint8_t* txId) {
-	std::uniform_int_distribution<uint8_t> dist(0, 255);
-	for (int i = 0; i < 12; ++i) txId[i] = dist(rng);
+	// uint8_t is not a permitted distribution type per [rand.req.genl]; use unsigned.
+	std::uniform_int_distribution<unsigned> dist(0, 255);
+	for (int i = 0; i < 12; ++i) txId[i] = static_cast<uint8_t>(dist(rng));
 }
 
 struct TestConfig {
@@ -577,10 +580,10 @@ NatCheckResult checkNat(const std::string& customHost, uint16_t customPort,
 	// Resolve and collect servers with unique destination IPs.
 	// We need at least 2 distinct IPs for reliable Symmetric NAT detection.
 	std::vector<std::pair<StunServer, std::string>> selected; // {server, resolvedIp}
-if (verbose)
-	std::cout << "\n" CLR_BOLD "Phase 1" CLR_RESET " — Resolving & probing (need 2+ distinct IPs)\n";
+	if (verbose)
+		std::cout << "\n" CLR_BOLD "Phase 1" CLR_RESET " — Resolving & probing (need 2+ distinct IPs)\n";
 
-for (const auto& cand : candidates) {
+	for (const auto& cand : candidates) {
 	if (selected.size() >= 4) break; // cap at 4 probes
 	std::string ip = resolveHost(cand.host);
 	if (ip.empty()) {
@@ -606,28 +609,28 @@ for (const auto& cand : candidates) {
 	if (p.reachable) selected.push_back({cand, ip});
 	// Stop once we have 2 reachable distinct-IP servers for Phase 2
 	// (keep collecting up to 4 for display richness)
-}
+	}
 
-// Count reachable probes
-int reachable = 0;
-for (const auto& p : result.probes)
-	if (p.reachable) ++reachable;
+	// Count reachable probes
+	int reachable = 0;
+	for (const auto& p : result.probes)
+		if (p.reachable) ++reachable;
 
 	if (reachable == 0) {
 		result.type = NatType::UdpBlocked;
 		goto done;
 	}
 
-// Use first reachable mapped address as public address
-for (const auto& p : result.probes) {
+	// Use first reachable mapped address as public address
+	for (const auto& p : result.probes) {
 	if (p.reachable && p.mappedAddr.valid) {
 		result.publicAddr = p.mappedAddr;
 		break;
 	}
-}
+	}
 
-// Get local outbound IP via dummy UDP connect (no packet sent)
-{
+	// Get local outbound IP via dummy UDP connect (no packet sent)
+	{
 	int tmpFd = socket(AF_INET, SOCK_DGRAM, 0);
 	if (tmpFd >= 0) {
 		sockaddr_in remote{};
@@ -648,25 +651,25 @@ for (const auto& p : result.probes) {
 		}
 		close(tmpFd);
 	}
-}
+	}
 
-// Open Internet check (RFC 3489 Test I, §10.1):
-// If the mapped IP equals the local outbound IP, there is no NAT.
-// RFC 3489 specifies IP-only comparison — port is not part of the criterion.
-if (result.localAddr.valid && result.publicAddr.valid &&
+	// Open Internet check (RFC 3489 Test I, §10.1):
+	// If the mapped IP equals the local outbound IP, there is no NAT.
+	// RFC 3489 specifies IP-only comparison — port is not part of the criterion.
+	if (result.localAddr.valid && result.publicAddr.valid &&
 		result.localAddr.ip == result.publicAddr.ip) {
 	result.type = NatType::OpenInternet;
 	goto done;
-}
+	}
 
-//  Phase 2: Cross-check mapped IP:PORT across DISTINCT-IP servers
-// Check if EITHER the IP or PORT changes across servers.
-// Probing the same physical IP twice always gives the same mapped address
-// even on Symmetric NAT — so those duplicates were excluded in Phase 1.
-if (verbose)
-	std::cout << "\n" CLR_BOLD "Phase 2" CLR_RESET " — Cross-checking mapped IP:port (distinct IPs only)\n";
+	//  Phase 2: Cross-check mapped IP:PORT across DISTINCT-IP servers
+	// Check if EITHER the IP or PORT changes across servers.
+	// Probing the same physical IP twice always gives the same mapped address
+	// even on Symmetric NAT — so those duplicates were excluded in Phase 1.
+	if (verbose)
+		std::cout << "\n" CLR_BOLD "Phase 2" CLR_RESET " — Cross-checking mapped IP:port (distinct IPs only)\n";
 
-{
+	{
 	StunAddress refAddr;
 	bool allSame = true;
 	int compared = 0;
@@ -697,16 +700,16 @@ if (verbose)
 		result.type = NatType::Symmetric;
 		goto done;  // Symmetric NAT confirmed — skip Phase 3
 	}
-}
+	}
 
-// Phase 3: Cone-type refinement via RFC 3489 CHANGE_REQUEST
-// Google/Cloudflare servers (RFC 5389) silently ignore CHANGE_REQUEST, so
-// Phase 3 MUST use RFC 3489-capable servers.  We collect up to 3 such
-// servers so Tests II and III can fall back to another if one is down.
-if (verbose)
-	std::cout << "\n" CLR_BOLD "Phase 3" CLR_RESET " — Cone-type refinement via RFC 3489 CHANGE_REQUEST / RFC 5780\n";
+	// Phase 3: Cone-type refinement via RFC 3489 CHANGE_REQUEST
+	// Google/Cloudflare servers (RFC 5389) silently ignore CHANGE_REQUEST, so
+	// Phase 3 MUST use RFC 3489-capable servers.  We collect up to 3 such
+	// servers so Tests II and III can fall back to another if one is down.
+	if (verbose)
+		std::cout << "\n" CLR_BOLD "Phase 3" CLR_RESET " — Cone-type refinement via RFC 3489 CHANGE_REQUEST / RFC 5780\n";
 
-{
+	{
 	// RFC 3489-capable servers that actually honour CHANGE_REQUEST.
 	std::vector<StunServer> rfc3489Pool = {
 		{ "stun.stunprotocol.org",       3478  },
@@ -930,13 +933,13 @@ if (verbose)
 		// No server confirmed cone type — classify conservatively.
 		result.type = NatType::PortRestrictedCone;
 	}
-}
+	}
 
 done:
-auto t1   = std::chrono::steady_clock::now();
-result.timeMs = static_cast<int>(
+	auto t1   = std::chrono::steady_clock::now();
+	result.timeMs = static_cast<int>(
 		std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
-return result;
+	return result;
 }
 
 // Banner
@@ -1055,7 +1058,12 @@ int main(int argc, char** argv) {
 			customHost = argv[++i];
 			useCustom  = true;
 		} else if ((a == "-p" || a == "--port") && i + 1 < argc) {
-			customPort = static_cast<uint16_t>(std::atoi(argv[++i]));
+			int port = std::atoi(argv[++i]);
+			if (port < 1 || port > 65535) {
+				std::cerr << "Invalid port: " << argv[i] << " (must be 1-65535)\n";
+				return 1;
+			}
+			customPort = static_cast<uint16_t>(port);
 		} else if (a == "-v" || a == "--verbose") {
 			verbose = true;
 		} else {
