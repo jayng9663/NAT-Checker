@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags: [ 'v*' ]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & publish Linux release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive version from tag
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build static x86_64 binary (musl/Alpine)
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          docker run --rm -e VERSION -v "$PWD:/src" -w /src alpine:3.20 sh -c '
+            apk add --no-cache build-base cmake make &&
+            cmake -S . -B build-static -DCMAKE_BUILD_TYPE=Release \
+                  -DNATCHECK_STATIC=ON -DNATCHECK_VERSION="$VERSION" &&
+            cmake --build build-static -j &&
+            strip build-static/nat_check'
+
+      - name: Stage artifact
+        run: |
+          mkdir -p dist
+          cp build-static/nat_check dist/nat_check-linux-x86_64
+          file dist/nat_check-linux-x86_64
+          file dist/nat_check-linux-x86_64 | grep -q "statically linked"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/nat_check-linux-x86_64 \
+            --title "nat_check $GITHUB_REF_NAME" \
+            --generate-notes
