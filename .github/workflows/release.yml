@@ -43,4 +43,4 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             dist/nat_check-linux-x86_64 \
             --title "nat_check $GITHUB_REF_NAME" \
-            --generate-notes
+            --notes "Prebuilt static \`nat_check-linux-x86_64\` for any x86_64 Linux distro. See the commit history for changes."
