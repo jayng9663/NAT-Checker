@@ -1,16 +1,34 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(nat_check
-	VERSION 1.0.0
+	VERSION 1.1.0
 	DESCRIPTION "RFC-compliant NAT type detection for Linux"
 	LANGUAGES CXX)
 
 # --- Options ---------------------------------------------------------------
 option(NATCHECK_STATIC "Link the binary statically (portable releases)" OFF)
 
-# Version string baked into the binary. CI overrides this with the git tag,
-# e.g. -DNATCHECK_VERSION=1.2.3
-set(NATCHECK_VERSION "${PROJECT_VERSION}" CACHE STRING "Version string for --version")
+# Version string baked into the binary. The release workflow passes the tag,
+# e.g. -DNATCHECK_VERSION=1.2.3. Otherwise it comes from `git describe` at
+# configure time (e.g. 1.1.0-3-gabc1234), falling back to PROJECT_VERSION when
+# the source is not a git checkout.
+if(NOT NATCHECK_VERSION)
+	set(NATCHECK_VERSION "${PROJECT_VERSION}")
+	find_package(Git QUIET)
+	if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+		execute_process(
+			COMMAND "${GIT_EXECUTABLE}" describe --tags --dirty --always
+			WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+			OUTPUT_VARIABLE _natcheck_git_desc
+			OUTPUT_STRIP_TRAILING_WHITESPACE
+			RESULT_VARIABLE _natcheck_git_rc
+			ERROR_QUIET)
+		if(_natcheck_git_rc EQUAL 0 AND _natcheck_git_desc)
+			string(REGEX REPLACE "^v" "" NATCHECK_VERSION "${_natcheck_git_desc}")
+		endif()
+	endif()
+endif()
+message(STATUS "nat_check version: ${NATCHECK_VERSION}")
 
 # --- Target ----------------------------------------------------------------
 add_executable(nat_check
