@@ -51,7 +51,8 @@ int main(int argc, char** argv) {
 	printBanner();
 
 	std::cout << CLR_BOLD "  STUN Servers: " CLR_RESET
-		<< "RFC 3489-capable (stun.stunprotocol.org, stun.antisip.com, stun.schlund.de, etc.)\n";
+		<< mappingServerPool().size() << " for mapping, "
+		<< changeRequestServerPool().size() << " for CHANGE-REQUEST tests (see --help)\n";
 	if (useCustom)
 		std::cout << CLR_BOLD "  Custom       : " CLR_RESET << customHost << ":" << customPort << "\n";
 	std::cout << CLR_BOLD "  Verbose      : " CLR_RESET << (verbose ? "yes" : "no") << "\n";

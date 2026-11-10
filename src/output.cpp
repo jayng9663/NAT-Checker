@@ -64,6 +64,7 @@ void printResult(const NatCheckResult& r) {
 		case NatType::FullCone:
 			std::cout << "  " CLR_GREEN "● Excellent — Open/Full Cone allows easy P2P\n" CLR_RESET;
 			break;
+		case NatType::SymmetricUdpFirewall:
 		case NatType::RestrictedCone:
 		case NatType::PortRestrictedCone:
 			std::cout << "  " CLR_YELLOW "◑ Moderate — Hole-punching typically works\n" CLR_RESET;
@@ -79,32 +80,38 @@ void printResult(const NatCheckResult& r) {
 			break;
 	}
 
-	// Note about RFC 3489 vs 5389
-	if (r.type == NatType::RestrictedCone || r.type == NatType::PortRestrictedCone) {
+	// The cautious fallback results are guesses when filtering was not tested.
+	if (!r.filteringTested &&
+		(r.type == NatType::PortRestrictedCone || r.type == NatType::SymmetricUdpFirewall)) {
 		std::cout << "\n  " CLR_YELLOW "Note:" CLR_RESET
-			<< " Cone sub-type detection requires an RFC 3489 server that\n"
-			<< "  honours CHANGE_REQUEST. Google/Cloudflare STUN use RFC 5389\n"
-			<< "  and ignore that attribute. For exact classification run:\n"
-			<< "    " CLR_CYAN "./nat_check --server stun.stunprotocol.org --port 3478\n" CLR_RESET;
+			<< " Filtering was NOT tested: no STUN server that advertises a second\n"
+			<< "  address (RFC 3489 CHANGED-ADDRESS / RFC 5780 OTHER-ADDRESS) was reachable,\n"
+			<< "  so this is the most cautious result, not a measured one. Try another server:\n"
+			<< "    " CLR_CYAN "nat_check --server <host> --port <port>\n" CLR_RESET;
 	}
 	std::cout << "\n";
+}
+
+static void printPool(const std::vector<StunServer>& pool) {
+	for (const auto& s : pool)
+		std::cout << "  " << s.host << ":" << s.port << "\n";
 }
 
 void printUsage(const char* prog) {
 	std::cout << "Usage: " << prog << " [OPTIONS]\n\n"
 		<< "Options:\n"
-		<< "  -s, --server <host>  Custom STUN server (probed in addition to defaults)\n"
+		<< "  -s, --server <host>  Custom STUN server (tried first, ahead of the defaults)\n"
 		<< "  -p, --port   <port>  Custom STUN server port (default: 3478)\n"
 		<< "  -v, --verbose        Show per-test details\n"
 		<< "  -h, --help           Show this help\n"
 		<< "      --version        Show version and exit\n\n"
-		<< "Default servers (RFC 3489-capable, ordered by priority):\n"
-		<< "  stun.stunprotocol.org:3478\n"
-		<< "  stun.antisip.com:3478\n"
-		<< "  stun.schlund.de:3478\n"
-		<< "  stun.voipbuster.com:3478\n\n"
-		<< "Examples:\n"
+		<< "Mapping servers (Phase 1/2, in order):\n";
+	printPool(mappingServerPool());
+	std::cout << "\nCHANGE-REQUEST servers (Tests II/III, in order; only those that\n"
+		<< "advertise CHANGED-ADDRESS or OTHER-ADDRESS are used):\n";
+	printPool(changeRequestServerPool());
+	std::cout << "\nExamples:\n"
 		<< "  " << prog << "\n"
 		<< "  " << prog << " -v\n"
-		<< "  " << prog << " --server stun.stunprotocol.org --port 3478\n\n";
+		<< "  " << prog << " --server stun.example.com --port 3478\n\n";
 }

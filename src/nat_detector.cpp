@@ -16,25 +16,27 @@
 
 const char* natTypeName(NatType t) {
 	switch (t) {
-		case NatType::UdpBlocked:          return "UDP Blocked";
-		case NatType::OpenInternet:        return "Open Internet";
-		case NatType::FullCone:            return "Full Cone NAT";
-		case NatType::RestrictedCone:      return "Restricted NAT";
-		case NatType::PortRestrictedCone:  return "Port Restricted NAT";
-		case NatType::Symmetric:           return "Symmetric NAT";
-		default:                           return "Unknown";
+		case NatType::UdpBlocked:           return "UDP Blocked";
+		case NatType::OpenInternet:         return "Open Internet";
+		case NatType::SymmetricUdpFirewall: return "Symmetric UDP Firewall";
+		case NatType::FullCone:             return "Full Cone NAT";
+		case NatType::RestrictedCone:       return "Restricted NAT";
+		case NatType::PortRestrictedCone:   return "Port Restricted NAT";
+		case NatType::Symmetric:            return "Symmetric NAT";
+		default:                            return "Unknown";
 	}
 }
 
 const char* natTypeColor(NatType t) {
 	switch (t) {
-		case NatType::OpenInternet:        return CLR_GREEN;
-		case NatType::FullCone:            return CLR_GREEN;
-		case NatType::RestrictedCone:      return CLR_YELLOW;
-		case NatType::PortRestrictedCone:  return CLR_YELLOW;
-		case NatType::Symmetric:           return CLR_RED;
-		case NatType::UdpBlocked:          return CLR_RED;
-		default:                           return CLR_BLUE;
+		case NatType::OpenInternet:         return CLR_GREEN;
+		case NatType::FullCone:             return CLR_GREEN;
+		case NatType::SymmetricUdpFirewall: return CLR_YELLOW;
+		case NatType::RestrictedCone:       return CLR_YELLOW;
+		case NatType::PortRestrictedCone:   return CLR_YELLOW;
+		case NatType::Symmetric:            return CLR_RED;
+		case NatType::UdpBlocked:           return CLR_RED;
+		default:                            return CLR_BLUE;
 	}
 }
 
@@ -43,7 +45,10 @@ const char* natTypeDescription(NatType t) {
 		case NatType::UdpBlocked:
 			return "All UDP traffic is blocked. P2P connections impossible.";
 		case NatType::OpenInternet:
-			return "No NAT. Direct public IP. Ideal for P2P and gaming.";
+			return "No NAT and no inbound filtering. Ideal for P2P and gaming.";
+		case NatType::SymmetricUdpFirewall:
+			return "Public IP, but a firewall only lets in replies from the\n"
+				"  address and port you sent to. P2P works with hole-punching.";
 		case NatType::FullCone:
 			return "Once a port is mapped, any external host can reach it.\n"
 				"  Best NAT type. P2P works easily.";
@@ -61,12 +66,39 @@ const char* natTypeDescription(NatType t) {
 	}
 }
 
+// Server pools
+
+const std::vector<StunServer>& mappingServerPool() {
+	static const std::vector<StunServer> pool = {
+		{ "stun.antisip.com",        3478  },
+		{ "stun.schlund.de",         3478  },
+		{ "stun.voipbuster.com",     3478  },
+		{ "stun.ekiga.net",          3478  },
+		{ "stun.l.google.com",       19302 }, // RFC 5389 only
+		{ "stun.cloudflare.com",     3478  }, // RFC 5389 only
+	};
+	return pool;
+}
+
+const std::vector<StunServer>& changeRequestServerPool() {
+	static const std::vector<StunServer> pool = {
+		{ "stun.schlund.de",          3478 },
+		{ "stun.voipbuster.com",      3478 },
+		{ "stun.sipgate.net",         3478 },
+		{ "stun.ekiga.net",           3478 },
+		{ "stun.antisip.com",         3478 },
+		{ "stun.voip.blackberry.com", 3478 },
+	};
+	return pool;
+}
+
 // STUN test runner
 
 namespace {
 
 struct TestConfig {
-	std::string serverHost;
+	std::string label;        // hostname, for log output only
+	std::string serverIp;     // resolved IPv4 address the request is sent to
 	uint16_t    serverPort;
 	uint32_t    changeFlags;  // 0 = normal, CHANGE_IP, CHANGE_PORT, CHANGE_IP|CHANGE_PORT
 	int         timeoutMs;
@@ -86,14 +118,14 @@ StunResponse runTest(UdpSocket& sock, const TestConfig& cfg, bool verbose) {
 
 	for (int attempt = 0; attempt < cfg.retries; ++attempt) {
 		if (verbose) {
-			std::cout << CLR_BLUE << "  → Sending to " << cfg.serverHost
-				<< ":" << cfg.serverPort;
+			std::cout << CLR_BLUE << "  → Sending to " << cfg.label
+				<< " (" << cfg.serverIp << ":" << cfg.serverPort << ")";
 			if (cfg.changeFlags & CHANGE_IP)   std::cout << " [change-IP]";
 			if (cfg.changeFlags & CHANGE_PORT) std::cout << " [change-port]";
 			std::cout << CLR_RESET << std::endl;
 		}
 
-		if (!sock.send(msg.data, cfg.serverHost, cfg.serverPort)) {
+		if (!sock.send(msg.data, cfg.serverIp, cfg.serverPort)) {
 			if (verbose) std::cout << CLR_RED << "  ✗ Send failed\n" << CLR_RESET;
 			continue;
 		}
@@ -132,22 +164,7 @@ StunResponse runTest(UdpSocket& sock, const TestConfig& cfg, bool verbose) {
 	return StunResponse{};
 }
 
-// Primary pool: RFC 3489-capable servers that honor CHANGE_REQUEST.
-const std::vector<StunServer> STUN_CANDIDATE_POOL = {
-	// RFC 3489 Primary Servers
-	{ "stun.stunprotocol.org",         3478 },
-	{ "stun.antisip.com",              3478 },
-	{ "stun.schlund.de",               3478 },
-	{ "stun.voipbuster.com",           3478 },
-	{ "stun.ekiga.net",                3478 },
-	{ "stun.ideasip.com",              3478 },
-	{ "stunserver.stunprotocol.org",   3478 },
-	// Additional Public STUN Servers
-	{ "stun.l.google.com",             19302 }, // Google (RFC 5389, fallback only)
-	{ "stun.cloudflare.com",           3478 }   // Cloudflare (RFC 5389, fallback only)
-};
-
-// Probe a single STUN server (basic binding only).
+// Probe a single STUN server (basic binding only) at an already-resolved IP.
 ServerProbe probeServer(UdpSocket& sock, const StunServer& srv,
 		const std::string& resolvedIp, bool verbose) {
 	ServerProbe p;
@@ -156,7 +173,7 @@ ServerProbe probeServer(UdpSocket& sock, const StunServer& srv,
 
 	auto t0 = std::chrono::steady_clock::now();
 	StunResponse resp = runTest(sock,
-			{srv.host, srv.port, 0, DEFAULT_TIMEOUT_MS, MAX_RETRIES}, verbose);
+			{srv.host, resolvedIp, srv.port, 0, DEFAULT_TIMEOUT_MS, MAX_RETRIES}, verbose);
 	auto t1 = std::chrono::steady_clock::now();
 
 	p.reachable  = resp.received;
@@ -166,52 +183,184 @@ ServerProbe probeServer(UdpSocket& sock, const StunServer& srv,
 	return p;
 }
 
+// A server that advertises a second address (CHANGED-ADDRESS for RFC 3489,
+// OTHER-ADDRESS for RFC 5780) and can therefore answer CHANGE-REQUEST.
+struct ChangeServer {
+	std::string host;
+	std::string ip;   // resolved once; every test is sent to this exact address
+	uint16_t    port;
+};
+
+static constexpr int MAX_CHANGE_SERVERS = 3;
+static constexpr int CHANGE_REQ_RETRIES = 3;
+
+std::vector<ChangeServer> findChangeServers(UdpSocket& sock,
+		const std::string& customHost, uint16_t customPort, bool useCustom, bool verbose) {
+	std::vector<StunServer> pool;
+	if (useCustom) pool.push_back({customHost, customPort});
+	for (const auto& s : changeRequestServerPool()) pool.push_back(s);
+
+	if (verbose)
+		std::cout << CLR_CYAN "  Looking for servers that advertise a second address\n" CLR_RESET;
+
+	std::vector<ChangeServer> ready;
+	for (const auto& s : pool) {
+		if (static_cast<int>(ready.size()) >= MAX_CHANGE_SERVERS) break;
+
+		std::string ip = resolveHost(s.host);
+		if (ip.empty()) {
+			if (verbose)
+				std::cout << CLR_YELLOW "  ✗ " << s.host << " — DNS failed\n" CLR_RESET;
+			continue;
+		}
+
+		StunResponse r = runTest(sock, {s.host, ip, s.port, 0, DEFAULT_TIMEOUT_MS, 1}, verbose);
+		if (!r.received) continue; // silent timeout: try next
+
+		if (r.changedAddress.valid || r.otherAddress.valid) {
+			bool        rfc3489 = r.changedAddress.valid;
+			StunAddress alt     = rfc3489 ? r.changedAddress : r.otherAddress;
+			ready.push_back({s.host, ip, s.port});
+			if (verbose)
+				std::cout << CLR_GREEN "  ✓ Ready [" << ready.size() << "/" << MAX_CHANGE_SERVERS
+					<< "] " CLR_RESET << s.host << " " << ip << ":" << s.port
+					<< " (" << (rfc3489 ? "RFC 3489" : "RFC 5780") << " alt=" << alt.str() << ")\n";
+		} else if (verbose) {
+			std::cout << CLR_YELLOW "  ↷ " CLR_RESET << s.host
+				<< " — responded but no CHANGED_ADDRESS / OTHER_ADDRESS (RFC 5389-only, skipping)\n";
+		}
+	}
+
+	if (ready.empty() && verbose)
+		std::cout << CLR_YELLOW
+			<< "  ⚠ No RFC 3489 / RFC 5780 server with alternate-address reachable.\n"
+			<< "    Use --server <host> --port <port> to force a specific server.\n"
+			<< CLR_RESET;
+	return ready;
+}
+
+// Send CHANGE-REQUEST with `flags` to each ready server in turn. Returns true as
+// soon as a reply arrives from the changed address:
+//   CHANGE_IP set   → reply source IP differs from the IP the request went to
+//   CHANGE_PORT only → same IP, different port
+// Per server: a timeout moves on to the next server (the NAT or firewall
+// dropped the reply, or the server is down); a reply from the original address
+// means the server ignored the flags, so it is retried after 1 s, up to
+// CHANGE_REQ_RETRIES times.
+bool runChangeTest(UdpSocket& sock, const std::vector<ChangeServer>& ready,
+		uint32_t flags, const char* name, bool verbose) {
+	if (verbose)
+		std::cout << CLR_CYAN "\n  " << name << CLR_RESET
+			<< ((flags & CHANGE_IP) ? " — change IP+port\n" : " — change port only\n");
+
+	for (const auto& srv : ready) {
+		if (verbose)
+			std::cout << CLR_BLUE "  → Server: " CLR_RESET << srv.host
+				<< " (" << srv.ip << ":" << srv.port << ")\n";
+
+		bool timedOut = false;
+		for (int attempt = 0; attempt < CHANGE_REQ_RETRIES; ++attempt) {
+			if (attempt > 0 && verbose)
+				std::cout << CLR_YELLOW "  ↻ Retrying " << name << " (attempt "
+					<< (attempt + 1) << "/" << CHANGE_REQ_RETRIES << ")\n" CLR_RESET;
+
+			StunResponse r = runTest(sock,
+					{srv.host, srv.ip, srv.port, flags, DEFAULT_TIMEOUT_MS, MAX_RETRIES}, verbose);
+			if (!r.received) {
+				timedOut = true;
+				break;
+			}
+
+			bool honoured = (flags & CHANGE_IP)
+				? r.senderAddr.ip != srv.ip
+				: (r.senderAddr.ip == srv.ip && r.senderAddr.port != srv.port);
+			if (honoured) return true;
+
+			if (verbose)
+				std::cout << CLR_YELLOW << "  ⚠ Attempt " << (attempt + 1)
+					<< ": server replied from the same "
+					<< ((flags & CHANGE_IP) ? "IP" : "port")
+					<< " — CHANGE_REQUEST ignored\n" << CLR_RESET;
+			sleep(1);
+		}
+
+		if (verbose)
+			std::cout << CLR_YELLOW "  ✗ " << srv.host
+				<< (timedOut ? " timed out on " : " ignored CHANGE_REQUEST on ")
+				<< name << " — trying next server\n" CLR_RESET;
+	}
+	return false;
+}
+
+// Local outbound IP via a UDP connect() (no packet is sent).
+StunAddress localOutboundAddr(uint16_t localPort) {
+	StunAddress addr;
+	int tmpFd = socket(AF_INET, SOCK_DGRAM, 0);
+	if (tmpFd < 0) return addr;
+	sockaddr_in remote{};
+	remote.sin_family      = AF_INET;
+	remote.sin_port        = htons(53);
+	remote.sin_addr.s_addr = inet_addr("8.8.8.8");
+	if (connect(tmpFd, reinterpret_cast<sockaddr*>(&remote), sizeof(remote)) == 0) {
+		sockaddr_in localSin{};
+		socklen_t   slen = sizeof(localSin);
+		if (getsockname(tmpFd, reinterpret_cast<sockaddr*>(&localSin), &slen) == 0) {
+			std::string ip = inet_ntoa(localSin.sin_addr);
+			if (ip != "0.0.0.0") {
+				addr.ip    = ip;
+				addr.port  = localPort;
+				addr.valid = true;
+			}
+		}
+	}
+	close(tmpFd);
+	return addr;
+}
+
 } // namespace
 
 // NAT Type Detection
 // Strategy:
-//   Phase 1 — Resolve each candidate server's IP, deduplicate, build a probe
-//             list of servers with DISTINCT destination IPs (critical for
-//             Symmetric NAT detection — a Symmetric NAT maps the same port to
-//             the same destination, so probing the same IP twice is useless).
-//             Needs at least 2 distinct destination IPs.
+//   Phase 1 — Resolve each candidate server once, deduplicate by IP, and probe
+//             servers with DISTINCT destination IPs (a Symmetric NAT maps the
+//             same destination to the same port, so probing one IP twice proves
+//             nothing). Every later request goes to the IP resolved here.
+//   Open Internet / firewall — if the public IP equals the local IP, Test II
+//             tells an open host from a Symmetric UDP Firewall (RFC 3489 §10.1).
 //   Phase 2 — Cross-check mapped IP:PORT across distinct-IP servers:
 //               same IP:port on all  → Cone-type NAT
 //               different IP or port → Symmetric NAT
-//   Phase 3 — Cone sub-type via RFC 3489 CHANGE_REQUEST (with sender validation).
+//   Phase 3 — Cone sub-type via CHANGE-REQUEST (Tests II and III) with
+//             reply-source validation.
 NatCheckResult checkNat(const std::string& customHost, uint16_t customPort,
 		bool verbose, bool useCustom) {
 	NatCheckResult result;
 	auto t0 = std::chrono::steady_clock::now();
 
-	// Phase 1: resolve candidates, deduplicate by IP, probe distinct servers
 	UdpSocket sock;
 	sock.bindAny();
 	uint16_t localPort = sock.localPort();
 
-	// Build candidate list (custom first, then pool)
+	// Phase 1: resolve candidates, deduplicate by IP, probe distinct servers
 	std::vector<StunServer> candidates;
 	if (useCustom) candidates.push_back({customHost, customPort});
-	for (const auto& s : STUN_CANDIDATE_POOL) candidates.push_back(s);
+	for (const auto& s : mappingServerPool()) candidates.push_back(s);
 
-	// Resolve and collect servers with unique destination IPs.
-	// We need at least 2 distinct IPs for reliable Symmetric NAT detection.
-	std::vector<std::pair<StunServer, std::string>> selected; // {server, resolvedIp}
 	if (verbose)
 		std::cout << "\n" CLR_BOLD "Phase 1" CLR_RESET " — Resolving & probing (need 2+ distinct IPs)\n";
 
+	int reachable = 0;
 	for (const auto& cand : candidates) {
-		if (selected.size() >= 4) break; // cap at 4 probes
+		if (reachable >= 4) break; // cap at 4 reachable probes
 		std::string ip = resolveHost(cand.host);
 		if (ip.empty()) {
 			if (verbose)
 				std::cout << CLR_YELLOW "  ✗ " << cand.host << " — DNS failed\n" CLR_RESET;
 			continue;
 		}
-		// Skip if we already have this IP (would give identical NAT mapping)
 		bool duplicate = false;
-		for (const auto& sel : selected)
-			if (sel.second == ip) { duplicate = true; break; }
+		for (const auto& p : result.probes)
+			if (p.resolvedIp == ip) { duplicate = true; break; }
 		if (duplicate) {
 			if (verbose)
 				std::cout << CLR_BLUE "  ↷ " << cand.host
@@ -223,22 +372,15 @@ NatCheckResult checkNat(const std::string& customHost, uint16_t customPort,
 				<< " → " << ip << "]" CLR_RESET "\n";
 		ServerProbe p = probeServer(sock, cand, ip, verbose);
 		result.probes.push_back(p);
-		if (p.reachable) selected.push_back({cand, ip});
-		// Stop once we have 2 reachable distinct-IP servers for Phase 2
-		// (keep collecting up to 4 for display richness)
-	}
-
-	// Count reachable probes
-	int reachable = 0;
-	for (const auto& p : result.probes)
 		if (p.reachable) ++reachable;
+	}
 
 	if (reachable == 0) {
 		result.type = NatType::UdpBlocked;
+		result.filteringTested = true;
 		goto done;
 	}
 
-	// Use first reachable mapped address as public address
 	for (const auto& p : result.probes) {
 		if (p.reachable && p.mappedAddr.valid) {
 			result.publicAddr = p.mappedAddr;
@@ -246,43 +388,28 @@ NatCheckResult checkNat(const std::string& customHost, uint16_t customPort,
 		}
 	}
 
-	// Get local outbound IP via dummy UDP connect (no packet sent)
-	{
-		int tmpFd = socket(AF_INET, SOCK_DGRAM, 0);
-		if (tmpFd >= 0) {
-			sockaddr_in remote{};
-			remote.sin_family      = AF_INET;
-			remote.sin_port        = htons(53);
-			remote.sin_addr.s_addr = inet_addr("8.8.8.8");
-			if (connect(tmpFd, reinterpret_cast<sockaddr*>(&remote), sizeof(remote)) == 0) {
-				sockaddr_in localSin{};
-				socklen_t   slen = sizeof(localSin);
-				if (getsockname(tmpFd, reinterpret_cast<sockaddr*>(&localSin), &slen) == 0) {
-					std::string ip = inet_ntoa(localSin.sin_addr);
-					if (ip != "0.0.0.0") {
-						result.localAddr.ip    = ip;
-						result.localAddr.port  = localPort;
-						result.localAddr.valid = true;
-					}
-				}
-			}
-			close(tmpFd);
-		}
-	}
+	result.localAddr = localOutboundAddr(localPort);
 
-	// Open Internet check (RFC 3489 Test I, §10.1):
-	// If the mapped IP equals the local outbound IP, there is no NAT.
-	// RFC 3489 specifies IP-only comparison — port is not part of the criterion.
+	// No NAT (RFC 3489 §10.1): mapped IP equals the local IP. Test II then
+	// separates an open host from a Symmetric UDP Firewall.
 	if (result.localAddr.valid && result.publicAddr.valid &&
 		result.localAddr.ip == result.publicAddr.ip) {
-		result.type = NatType::OpenInternet;
+		if (verbose)
+			std::cout << "\n" CLR_BOLD "No NAT" CLR_RESET " — public IP is local; testing inbound filtering\n";
+		std::vector<ChangeServer> ready =
+			findChangeServers(sock, customHost, customPort, useCustom, verbose);
+		if (ready.empty()) {
+			result.type = NatType::SymmetricUdpFirewall; // most cautious, untested
+		} else {
+			result.filteringTested = true;
+			result.type = runChangeTest(sock, ready, CHANGE_IP | CHANGE_PORT, "Test II", verbose)
+				? NatType::OpenInternet
+				: NatType::SymmetricUdpFirewall;
+		}
 		goto done;
 	}
 
-	// Phase 2: Cross-check mapped IP:PORT across DISTINCT-IP servers.
-	// Check if EITHER the IP or PORT changes across servers. Probing the same
-	// physical IP twice always gives the same mapped address even on Symmetric
-	// NAT — so those duplicates were excluded in Phase 1.
+	// Phase 2: cross-check mapped IP:PORT across distinct-IP servers.
 	if (verbose)
 		std::cout << "\n" CLR_BOLD "Phase 2" CLR_RESET " — Cross-checking mapped IP:port (distinct IPs only)\n";
 
@@ -300,8 +427,7 @@ NatCheckResult checkNat(const std::string& customHost, uint16_t customPort,
 				refAddr = p.mappedAddr;
 			} else {
 				++compared;
-				// Check if EITHER IP or PORT differs
-				if (p.mappedAddr.ip != refAddr.ip || p.mappedAddr.port != refAddr.port) {
+				if (p.mappedAddr != refAddr) {
 					allSame = false;
 					break;
 				}
@@ -315,237 +441,36 @@ NatCheckResult checkNat(const std::string& customHost, uint16_t customPort,
 
 		if (!allSame) {
 			result.type = NatType::Symmetric;
-			goto done;  // Symmetric NAT confirmed — skip Phase 3
+			result.filteringTested = true; // filtering is irrelevant here
+			goto done;
 		}
 	}
 
-	// Phase 3: Cone-type refinement via RFC 3489 CHANGE_REQUEST.
-	// Google/Cloudflare servers (RFC 5389) silently ignore CHANGE_REQUEST, so
-	// Phase 3 MUST use RFC 3489-capable servers. We collect up to 3 such servers
-	// so Tests II and III can fall back to another if one is down.
+	// Phase 3: cone sub-type via CHANGE-REQUEST. Google/Cloudflare (RFC 5389)
+	// ignore CHANGE-REQUEST, so only servers that advertise a second address
+	// are used.
 	if (verbose)
 		std::cout << "\n" CLR_BOLD "Phase 3" CLR_RESET " — Cone-type refinement via RFC 3489 CHANGE_REQUEST / RFC 5780\n";
 
 	{
-		// RFC 3489-capable servers that actually honour CHANGE_REQUEST.
-		std::vector<StunServer> rfc3489Pool = {
-			{ "stun.stunprotocol.org",       3478  },
-			{ "stun.antisip.com",            3478  },
-			{ "stun.schlund.de",             3478  },
-			{ "stun.voipbuster.com",         3478  },
-			{ "stun.ekiga.net",              3478  },
-			{ "stun.ideasip.com",            3478  },
-			{ "stun.voip.blackberry.com",    3478  },
-			{ "stun.sipgate.net",            3478  },
-			{ "stunserver.stunprotocol.org", 3478  },
-		};
-
-		// Prepend the custom server so it is tried first.
-		if (useCustom)
-			rfc3489Pool.insert(rfc3489Pool.begin(), {customHost, customPort});
-
-		// A server confirmed to advertise an alternate address (CHANGED_ADDRESS
-		// for RFC 3489, or OTHER_ADDRESS for RFC 5780) and therefore capable of
-		// honouring CHANGE_REQUEST.
-		enum class StunProtocol { RFC3489, RFC5780 };
-		struct Rfc3489Candidate {
-			std::string  host;
-			uint16_t     port;
-			std::string  resolvedIp;
-			StunProtocol protocol = StunProtocol::RFC3489;
-		};
-
-		// Collect up to 3 ready servers — more = more resilient Tests II/III.
-		static constexpr int MAX_PHASE3_SERVERS  = 3;
-		static constexpr int CHANGE_REQ_RETRIES  = 3;
-
-		std::vector<Rfc3489Candidate> ready;
-
-		if (verbose)
-			std::cout << CLR_CYAN "  Probing RFC 3489 servers for CHANGE_REQUEST support\n" CLR_RESET;
-
-		for (const auto& s : rfc3489Pool) {
-			if (static_cast<int>(ready.size()) >= MAX_PHASE3_SERVERS) break;
-
-			StunResponse r = runTest(sock,
-					{s.host, s.port, 0, DEFAULT_TIMEOUT_MS, 1}, verbose);
-
-			if (r.received && (r.changedAddress.valid || r.otherAddress.valid)) {
-				// Accept both RFC 3489 (CHANGED_ADDRESS) and RFC 5780 (OTHER_ADDRESS)
-				StunProtocol proto  = r.changedAddress.valid ? StunProtocol::RFC3489
-				                                             : StunProtocol::RFC5780;
-				StunAddress  altAddr = r.changedAddress.valid ? r.changedAddress : r.otherAddress;
-				std::string  ip      = resolveHost(s.host);
-				ready.push_back({s.host, s.port, ip, proto});
-				if (verbose) {
-					const char* tag = (proto == StunProtocol::RFC3489) ? "RFC 3489" : "RFC 5780";
-					std::cout << CLR_GREEN "  ✓ Ready [" << ready.size() << "/" << MAX_PHASE3_SERVERS
-						<< "] " CLR_RESET << s.host << ":" << s.port
-						<< " (" << tag << " alt=" << altAddr.str() << ")\n";
-				}
-			} else if (r.received && !r.changedAddress.valid && !r.otherAddress.valid) {
-				if (verbose)
-					std::cout << CLR_YELLOW "  ↷ " CLR_RESET << s.host
-						<< " — responded but no CHANGED_ADDRESS / OTHER_ADDRESS (RFC 5389-only, skipping)\n";
-			}
-			// silent timeout: server unreachable, try next
-		}
-
+		std::vector<ChangeServer> ready =
+			findChangeServers(sock, customHost, customPort, useCustom, verbose);
 		if (ready.empty()) {
-			if (verbose)
-				std::cout << CLR_YELLOW
-					<< "  ⚠ No RFC 3489 / RFC 5780 server with alternate-address reachable.\n"
-					<< "    Use --server <rfc3489-host:port> to force a specific server.\n"
-					<< CLR_RESET;
-			result.type = NatType::PortRestrictedCone;
+			result.type = NatType::PortRestrictedCone; // most cautious, untested
 			goto done;
 		}
+		result.filteringTested = true;
 
 		if (verbose)
 			std::cout << "  " CLR_BOLD << ready.size()
 				<< " server(s) (RFC 3489 / RFC 5780) available for Tests II/III\n" CLR_RESET;
 
-		// Test II: change IP + port — response must come from a DIFFERENT IP.
-		//
-		// For each ready server (in priority order):
-		//   • Timeout         → server appears down, try next server.
-		//   • Same-IP reply   → CHANGE_REQUEST silently ignored (RFC 5389), retry
-		//                       up to CHANGE_REQ_RETRIES times, then try next server.
-		//   • Diff-IP reply   → CHANGE_REQUEST honoured → Full Cone confirmed.
-		if (verbose)
-			std::cout << CLR_CYAN "\n  Test II" CLR_RESET " — change IP+port\n";
-
-		bool test2HonourChanged = false;
-
-		for (const auto& srv : ready) {
-			if (verbose)
-				std::cout << CLR_BLUE "  → Server: " CLR_RESET
-					<< srv.host << ":" << srv.port << "\n";
-
-			bool timedOut   = false;
-			bool honoured   = false;
-			int  ignoredCnt = 0;
-
-			for (int attempt = 0; attempt < CHANGE_REQ_RETRIES; ++attempt) {
-				if (attempt > 0 && verbose)
-					std::cout << CLR_YELLOW "  ↻ Retrying Test II (attempt "
-						<< (attempt + 1) << "/" << CHANGE_REQ_RETRIES << ")\n" CLR_RESET;
-
-				StunResponse r = runTest(sock,
-						{srv.host, srv.port, CHANGE_IP | CHANGE_PORT,
-						 DEFAULT_TIMEOUT_MS, MAX_RETRIES},
-						verbose);
-
-				if (!r.received) {
-					// Timeout — server may be down; skip remaining retries.
-					timedOut = true;
-					break;
-				}
-
-				if (r.senderAddr.valid && !srv.resolvedIp.empty() &&
-						r.senderAddr.ip != srv.resolvedIp) {
-					// Response arrived from a different IP → CHANGE_REQUEST honoured.
-					test2HonourChanged = true;
-					honoured = true;
-					break;
-				}
-
-				// Server replied from the same IP — CHANGE_REQUEST silently ignored.
-				++ignoredCnt;
-				if (verbose)
-					std::cout << CLR_YELLOW
-						<< "  ⚠ Attempt " << (attempt + 1)
-						<< ": server replied from same IP — CHANGE_REQUEST ignored (RFC 5389)\n"
-						<< CLR_RESET;
-				sleep(1);
-			}
-
-			if (honoured) break; // Full Cone confirmed — no need to try other servers.
-
-			if (timedOut) {
-				if (verbose)
-					std::cout << CLR_YELLOW "  ✗ " << srv.host
-						<< " timed out on Test II — trying next server\n" CLR_RESET;
-			} else if (ignoredCnt == CHANGE_REQ_RETRIES) {
-				if (verbose)
-					std::cout << CLR_YELLOW "  ✗ All " << CHANGE_REQ_RETRIES
-						<< " attempts from " << srv.host
-						<< " returned same IP — trying next server\n" CLR_RESET;
-			}
-		}
-
-		if (test2HonourChanged) {
+		if (runChangeTest(sock, ready, CHANGE_IP | CHANGE_PORT, "Test II", verbose))
 			result.type = NatType::FullCone;
-			goto done;
-		}
-
-		// Test III: change port only — response must come from a DIFFERENT port.
-		// Same multi-server fallback strategy as Test II.
-		if (verbose)
-			std::cout << CLR_CYAN "\n  Test III" CLR_RESET " — change port only\n";
-
-		bool test3HonourChanged = false;
-
-		for (const auto& srv : ready) {
-			if (verbose)
-				std::cout << CLR_BLUE "  → Server: " CLR_RESET
-					<< srv.host << ":" << srv.port << "\n";
-
-			bool timedOut   = false;
-			bool honoured   = false;
-			int  ignoredCnt = 0;
-
-			for (int attempt = 0; attempt < CHANGE_REQ_RETRIES; ++attempt) {
-				if (attempt > 0 && verbose)
-					std::cout << CLR_YELLOW "  ↻ Retrying Test III (attempt "
-						<< (attempt + 1) << "/" << CHANGE_REQ_RETRIES << ")\n" CLR_RESET;
-
-				StunResponse r = runTest(sock,
-						{srv.host, srv.port, CHANGE_PORT, DEFAULT_TIMEOUT_MS, MAX_RETRIES},
-						verbose);
-
-				if (!r.received) {
-					timedOut = true;
-					break;
-				}
-
-				if (r.senderAddr.valid &&
-						r.senderAddr.ip   == srv.resolvedIp && // same server IP …
-						r.senderAddr.port != srv.port) {        // … but a DIFFERENT port
-					test3HonourChanged = true;
-					honoured = true;
-					break;
-				}
-
-				++ignoredCnt;
-				if (verbose)
-					std::cout << CLR_YELLOW
-						<< "  ⚠ Attempt " << (attempt + 1)
-						<< ": server replied from same port — CHANGE_REQUEST ignored (RFC 5389)\n"
-						<< CLR_RESET;
-				sleep(1);
-			}
-
-			if (honoured) break;
-
-			if (timedOut) {
-				if (verbose)
-					std::cout << CLR_YELLOW "  ✗ " << srv.host
-						<< " timed out on Test III — trying next server\n" CLR_RESET;
-			} else if (ignoredCnt == CHANGE_REQ_RETRIES) {
-				if (verbose)
-					std::cout << CLR_YELLOW "  ✗ All " << CHANGE_REQ_RETRIES
-						<< " attempts from " << srv.host
-						<< " returned same port — trying next server\n" CLR_RESET;
-			}
-		}
-
-		if (test3HonourChanged) {
+		else if (runChangeTest(sock, ready, CHANGE_PORT, "Test III", verbose))
 			result.type = NatType::RestrictedCone;
-		} else {
-			// No server confirmed cone type — classify conservatively.
+		else
 			result.type = NatType::PortRestrictedCone;
-		}
 	}
 
 done:
